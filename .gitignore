@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+
+# never commit ROM dumps or anything extracted from them
+*.bin
+*.ic4
+*.ic6
+*.wav
+*.syx

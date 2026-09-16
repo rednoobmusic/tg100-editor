@@ -1,0 +1,25 @@
+[project]
+name = "tg100-editor"
+version = "0.1.0"
+description = "Editor for the Yamaha TG100's program and sample ROMs"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.22",
+    "PySide6>=6.5",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+tg100-editor = "tg100.gui.main:main"
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["tg100*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
