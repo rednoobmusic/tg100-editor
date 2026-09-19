@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from .. import codec, naming
+from .. import codec, dsp, naming
 from ..rom import RomError
 from ..waves import NATIVE_SAMPLE_RATE
 from . import audio
@@ -89,6 +89,7 @@ class WavesTab(QtWidgets.QWidget):
         rv.addWidget(self.usage)
 
         rv.addLayout(self._build_transport())
+        rv.addLayout(self._build_tools())
         rv.addWidget(self._build_editor())
 
         split.addWidget(right)
@@ -136,6 +137,93 @@ class WavesTab(QtWidgets.QWidget):
         row.addWidget(self.import_btn)
 
         return row
+
+    def _build_tools(self):
+        """Editing the audio in place, rather than only swapping it out."""
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(QtWidgets.QLabel("Edit"))
+
+        for label, tip, fn in (
+            ("Trim silence", "Drop the near silent tail, and head",
+             lambda x: dsp.trim_silence(x, threshold=8)),
+            ("Normalize", "Raise the peak to full scale",
+             dsp.normalize),
+            ("Fade out", "Fade the last 10 percent to nothing",
+             lambda x: dsp.fade_out(x, max(2, len(x) // 10))),
+            ("Half rate", "Halve the sample rate, freeing about half its bytes",
+             lambda x: dsp.resample(x, 2.0)),
+        ):
+            b = QtWidgets.QPushButton(label)
+            b.setToolTip(tip)
+            b.clicked.connect(lambda _, f=fn, n=label: self._apply_dsp(f, n))
+            row.addWidget(b)
+
+        row.addSpacing(12)
+        snap = QtWidgets.QPushButton("Snap loop")
+        snap.setToolTip("Move the loop point to the nearest zero crossing")
+        snap.clicked.connect(self._snap_loop)
+        row.addWidget(snap)
+
+        find = QtWidgets.QPushButton("Find loop")
+        find.setToolTip("Search for a loop point whose seam matches the tail")
+        find.clicked.connect(self._find_loop)
+        row.addWidget(find)
+
+        row.addStretch(1)
+        return row
+
+    def _apply_dsp(self, fn, label):
+        w = self._wave
+        if w is None or w.is_empty:
+            return
+        shared = self.rom.shares_data_with(w.index)
+        if shared and not self._confirm_shared(w.index, shared):
+            return
+        before = w.byte_length
+        try:
+            result = fn(w.samples())
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, label, str(exc))
+            return
+        if len(result) == 0:
+            QtWidgets.QMessageBox.warning(
+                self, label, "That would leave the wave empty."
+            )
+            return
+        w.write_samples(result)
+        freed = before - w.byte_length
+        note = f", freeing {freed} bytes" if freed > 0 else ""
+        self.reload()
+        self._select_index(w.index)
+        self.status.setText(f"{label} on wave {w.index}{note}")
+        self.romChanged.emit()
+
+    def _snap_loop(self):
+        w = self._wave
+        if w is None or w.is_empty or w.one_shot:
+            return
+        snapped = dsp.nearest_zero_crossing(w.samples(), w.loop)
+        moved = snapped - w.loop
+        self.loop_spin.setValue(int(snapped))
+        self.status.setText(
+            f"loop already sat on a zero crossing" if moved == 0
+            else f"moved the loop point {moved:+d} samples to a zero crossing"
+        )
+
+    def _find_loop(self):
+        w = self._wave
+        if w is None or w.is_empty:
+            return
+        found = dsp.suggest_loop(w.samples())
+        if found is None:
+            self.status.setText(
+                "no good loop found, the tail does not match anywhere, which is "
+                "normal for a single hit"
+            )
+            return
+        self.one_shot.setChecked(False)
+        self.loop_spin.setValue(int(found))
+        self.status.setText(f"loop point set to {found}, check it by ear")
 
     def _build_editor(self):
         box = QtWidgets.QGroupBox("Wave header")
@@ -474,15 +562,17 @@ class WavesTab(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "Could not write wave", str(exc))
             return
 
+        pending = ""
         if abs(rate - NATIVE_SAMPLE_RATE) > 1.0:
-            self.status.setText(
+            pending = (
                 f"Imported {Path(path).name}. Note it was {rate} Hz and the wave "
                 f"table runs at {NATIVE_SAMPLE_RATE:.0f} Hz, so it will play back "
                 f"{'sharp' if rate < NATIVE_SAMPLE_RATE else 'flat'}."
             )
-        self._keep_status = True
         self.reload()
         self._select_index(w.index)
+        if pending:
+            self.status.setText(pending)
         self.romChanged.emit()
 
     def _resolve_overflow(self, samples, need, have, filename):

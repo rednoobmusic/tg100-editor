@@ -55,6 +55,16 @@ leaving you to work it out.
 **Drums.** Ten kits with proper percussion names, and the drum sounds behind
 them. The list says how many kits share each sound before you change it.
 
+**Checking and space.** Tools has a check that walks every reference between
+the two ROMs, about 1700 of them, and says which edit broke what. It runs
+before every save. Alongside it is a space report and a repack, described
+below.
+
+**Editing the audio.** Trim silence, normalize, fade, halve the sample rate,
+snap a loop point to the nearest zero crossing, and search for a loop whose
+seam matches the tail. The loop search declines rather than guessing when a
+wave has decayed into silence, because a single hit has nothing to loop.
+
 **Banks.** The Internal map plus the four in the block at `0x10000`, with the
 General MIDI name alongside so you can see where Yamaha's choice differs from
 the standard. There is no fifth bank, whatever the voice bank names might
@@ -67,6 +77,18 @@ runs 240 bytes into voice memory.
 largest is 3 bytes. A longer replacement sample has to go somewhere, so the
 editor offers to truncate it or to move it, and moving only works once you have
 freed a run somewhere else.
+
+Freeing a run has two steps. Shorten something, then repack. Repack slides
+every wave down so the holes close and the free space collects in one run at
+the top, which is the only way a longer sample ever fits. Only addresses move,
+never sample data, and waves that share audio move together and keep sharing.
+
+Be warned about where the space comes from. Trimming the silence off every
+single wave in the ROM is worth under 3 KB, because Yamaha already trimmed it.
+Real room comes from giving something up: halving the sample rate of one long
+wave frees 23 KB on its own, which is eight times what trimming the entire ROM
+achieves. The editor shows you the budget, but it cannot invent space that is
+not there.
 
 **Waves share their audio.** 489 headers point at only 324 distinct regions.
 Wave 2, 143 and 144 are the same recording, and ten headers share the region at

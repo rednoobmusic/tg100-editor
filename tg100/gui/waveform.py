@@ -21,6 +21,8 @@ class WaveformView(QtWidgets.QWidget):
     GRID = QtGui.QColor("#262a33")
     AXIS = QtGui.QColor("#3a404e")
     WAVE = QtGui.QColor("#5ac8fa")
+    PEAK_FILL = QtGui.QColor(90, 200, 250, 90)
+    RMS_FILL = QtGui.QColor(125, 214, 255, 235)
     WAVE_LOOP = QtGui.QColor("#ffd66b")
     LOOP_FILL = QtGui.QColor(255, 214, 107, 28)
     LOOP_LINE = QtGui.QColor("#ffd66b")
@@ -146,7 +148,13 @@ class WaveformView(QtWidgets.QWidget):
             super().keyPressEvent(event)
 
     def _envelope(self, width):
-        """Min and max per pixel column for the visible slice."""
+        """Peak and RMS per pixel column for the visible slice.
+
+        Peaks alone make every busy sample look like a solid block, so the RMS
+        goes in as well. The bright inner band is the average level and the
+        pale outer shape is the peaks, which is how a sample's shape actually
+        reads at a glance.
+        """
         view = self._samples[self._view_start : self._view_start + self._view_len]
         n = len(view)
         if n == 0:
@@ -157,31 +165,51 @@ class WaveformView(QtWidgets.QWidget):
         # reduceat needs strictly increasing indices, so drop empty columns
         keep = np.concatenate([[True], starts[1:] > starts[:-1]])
         starts = starts[keep]
+
         lo = np.minimum.reduceat(view, starts)
         hi = np.maximum.reduceat(view, starts)
+
+        squares = view.astype(np.float64) ** 2
+        sums = np.add.reduceat(squares, starts)
+        counts = np.diff(np.append(starts, n)).astype(np.float64)
+        rms = np.sqrt(sums / np.maximum(counts, 1.0))
+
         xs = starts / n * width
-        return xs, lo, hi
+        return xs, lo, hi, rms
+
+    @staticmethod
+    def _band(xs, upper, lower, mid, scale):
+        """A closed path tracing one edge out and the other back."""
+        path = QtGui.QPainterPath()
+        path.moveTo(float(xs[0]), mid - float(upper[0]) * scale)
+        for x, v in zip(xs[1:], upper[1:]):
+            path.lineTo(float(x), mid - float(v) * scale)
+        for x, v in zip(reversed(xs), reversed(lower)):
+            path.lineTo(float(x), mid - float(v) * scale)
+        path.closeSubpath()
+        return path
 
     def paintEvent(self, event):
         p = QtGui.QPainter(self)
-        p.setRenderHint(QtGui.QPainter.Antialiasing, False)
+        p.setRenderHint(QtGui.QPainter.Antialiasing, True)
         w, h = self.width(), self.height()
         p.fillRect(self.rect(), self.BG)
 
         mid = h / 2.0
+        # Fixed to the full 12 bit range, never to the loudest sample in view.
+        # A quiet wave is meant to look quiet, and two waves are meant to be
+        # comparable by eye.
         scale = (h / 2.0 - 6) / 2048.0
 
         p.setPen(QtGui.QPen(self.GRID, 1))
         for frac in (0.25, 0.75):
-            y = h * frac
-            p.drawLine(0, int(y), w, int(y))
+            p.drawLine(0, int(h * frac), w, int(h * frac))
 
         if len(self._samples) == 0:
             p.setPen(self.TEXT)
             p.drawText(self.rect(), QtCore.Qt.AlignCenter, "no wave selected")
             return
 
-        # loop region behind the wave
         if self._loops:
             lx = self._sample_to_x(self._loop)
             ex = self._sample_to_x(len(self._samples))
@@ -194,9 +222,9 @@ class WaveformView(QtWidgets.QWidget):
 
         env = self._envelope(w)
         if env is not None:
-            xs, lo, hi = env
+            xs, lo, hi, rms = env
             view_n = min(self._view_len, len(self._samples) - self._view_start)
-            p.setPen(QtGui.QPen(self.WAVE, 1))
+
             if view_n <= w:
                 view = self._samples[
                     self._view_start : self._view_start + self._view_len
@@ -205,35 +233,40 @@ class WaveformView(QtWidgets.QWidget):
                 path = QtGui.QPainterPath()
                 for i, v in enumerate(view):
                     x = i * step
-                    y = mid - v * scale
+                    y = mid - float(v) * scale
                     if i == 0:
                         path.moveTo(x, y)
                     else:
                         path.lineTo(x, y)
-                p.setRenderHint(QtGui.QPainter.Antialiasing, True)
+                p.setPen(QtGui.QPen(self.WAVE, 1.4))
                 p.drawPath(path)
                 if view_n < w / 4:
                     p.setBrush(self.WAVE)
+                    p.setPen(QtCore.Qt.NoPen)
                     for i, v in enumerate(view):
-                        p.drawEllipse(QtCore.QPointF(i * step, mid - v * scale), 2, 2)
-                p.setRenderHint(QtGui.QPainter.Antialiasing, False)
-            else:
-                for x, a, b in zip(xs, lo, hi):
-                    y0 = mid - b * scale
-                    y1 = mid - a * scale
-                    p.drawLine(int(x), int(y0), int(x), max(int(y1), int(y0) + 1))
+                        p.drawEllipse(
+                            QtCore.QPointF(i * step, mid - float(v) * scale), 2.2, 2.2
+                        )
+            elif len(xs) > 1:
+                p.setPen(QtCore.Qt.NoPen)
+                p.setBrush(self.PEAK_FILL)
+                p.drawPath(self._band(xs, hi, lo, mid, scale))
+                p.setBrush(self.RMS_FILL)
+                p.drawPath(self._band(xs, rms, -rms, mid, scale))
+                p.setPen(QtGui.QPen(self.WAVE, 0.9))
+                p.setBrush(QtCore.Qt.NoBrush)
+                p.drawPath(self._band(xs, hi, lo, mid, scale))
 
-        # loop start line
         if self._loops:
             lx = self._sample_to_x(self._loop)
             if 0 <= lx <= w:
-                p.setPen(QtGui.QPen(self.LOOP_LINE, 1, QtCore.Qt.DashLine))
+                p.setPen(QtGui.QPen(self.LOOP_LINE, 1.2, QtCore.Qt.DashLine))
                 p.drawLine(int(lx), 0, int(lx), h)
 
         if self._cursor is not None:
             cx = self._sample_to_x(self._cursor)
             if 0 <= cx <= w:
-                p.setPen(QtGui.QPen(self.CURSOR, 1))
+                p.setPen(QtGui.QPen(self.CURSOR, 1.2))
                 p.drawLine(int(cx), 0, int(cx), h)
 
         p.setPen(self.TEXT)
