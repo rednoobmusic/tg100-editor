@@ -330,7 +330,7 @@ class VoicesTab(QtWidgets.QWidget):
         v = self._voice
         new = FieldGrid()
         new.changed.connect(self._on_edit)
-        new.add("Name", BoundText(lambda: v.name, lambda t: setattr(v, "name", t), 8))
+        new.add("Name", BoundText(lambda: v.name, self._set_name, 8))
         new.add(
             "Mode",
             BoundCombo(
@@ -371,6 +371,14 @@ class VoicesTab(QtWidgets.QWidget):
         for panel in self.elements:
             panel.bind(v, self.names)
         self._update_enabled()
+
+    def _set_name(self, text):
+        """Voice names are ASCII only, so say so instead of dropping the edit."""
+        try:
+            self._voice.name = text
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "Name not allowed", str(exc))
+            self.common.refresh()
 
     def _set_mode(self, value):
         self._voice.mode = value

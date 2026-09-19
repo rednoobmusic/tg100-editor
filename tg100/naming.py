@@ -5,6 +5,12 @@ are standards the TG100 follows. Everything else is worked out from the ROM
 itself, because the ROM is the authority on what a wave is actually used for
 and no name list can go stale that way.
 
+Wave names are INFERRED, not read. The sample ROM holds no text at all, so
+there is nothing to look up. A wave is named after the voices that play it,
+preferring the voice that plays it on its own over one that only layers it.
+That is a good guess and not a fact, so the interface shows every voice that
+uses a wave rather than only the one that won.
+
 The neutral points below were checked against the dump rather than assumed. Of
 249 sounding elements, 191 have detune 64 and 233 have note shift 64, and note
 shift spans exactly 40 to 88, which is plus or minus two octaves in semitones.
@@ -16,10 +22,13 @@ from . import layout
 
 NOTE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
 
+# How a voice uses a wave number, best evidence of what the recording is first.
+ROLE_NAMES = {0: "whole voice", 1: "layer 1", 2: "layer 2"}
+
 DETUNE_CENTRE = 64
 NOTE_SHIFT_CENTRE = 64
-PAN_CENTRE = 8
-PAN_FOLLOWS_VOICE = 0
+PAN_CENTRE = 0
+PAN_SILENT = 8
 
 
 def note_name(n):
@@ -49,13 +58,32 @@ def note_shift(value):
 
 
 def pan(value):
-    """0 means the element follows the voice, 1 to 15 are fixed positions."""
-    if value == PAN_FOLLOWS_VOICE:
-        return "follows voice"
-    d = value - PAN_CENTRE
-    if d == 0:
+    """Describe a pan value.
+
+    The hardware's table is not a symmetric left to right sweep, so this cannot
+    be worked out by treating 8 as the middle. From TG101's mPanMixTbl, which
+    lists the attenuation applied to each channel:
+
+        0        both channels at 0 dB, dead centre
+        1 to 6   left attenuated 3 dB per step, so it moves right
+        7        left silent, hard right
+        8        BOTH channels silent, the wave makes no sound at all
+        9        right silent, hard left
+        10 to 15 right attenuated, 10 is nearly hard left and 15 is nearly centre
+
+    So the left half runs backwards, and 8 is a mute rather than a centre.
+    """
+    if value == 0:
         return "centre"
-    return f"{'L' if d < 0 else 'R'}{abs(d)}"
+    if value == 8:
+        return "silent"
+    if value == 7:
+        return "hard right"
+    if value == 9:
+        return "hard left"
+    if value < 8:
+        return f"right {value}"
+    return f"left {16 - value}"
 
 
 def attenuation(value):
@@ -124,7 +152,9 @@ PERCUSSION = {
     76: "Hi Wood Block", 77: "Low Wood Block", 78: "Mute Cuica",
     79: "Open Cuica", 80: "Mute Triangle", 81: "Open Triangle",
     82: "Shaker", 83: "Jingle Bell", 84: "Bell Tree", 85: "Castanets",
-    86: "Mute Surdo", 87: "Open Surdo",
+    # Not the XG Surdos. The Standard kit sends note 86 to wave 265 and note 87
+    # to wave 69, which TG101 names Taiko-Drum High and Taiko-Drum Low.
+    86: "Taiko Drum High", 87: "Taiko Drum Low",
 }
 
 
@@ -152,41 +182,61 @@ class Names:
         self.wave_no_names = {}
         self.wave_no_users = {}
         self.wave_users = {}
+        self.wave_refs = {}
         self.wave_names = {}
         self._build()
 
     def _build(self):
-        # Which voices use each wave number. Order matters: the lowest voice
-        # index wins the name, because the GM banks are laid out in program
-        # order so voice 0 really is the grand piano. Sorting alphabetically
-        # would label wave number 1 "ElPiano2", which helps nobody.
+        # Which voices use each wave number, and HOW. The role matters more than
+        # the voice number. A voice that is a single element IS that recording,
+        # while element 2 of a dual voice is only a layer inside a thicker sound.
+        # Wave number 10 is the example that shows why: MusicBox is voice 10 and
+        # Vibes is voice 11, so picking the lowest number labels the recording
+        # "MusicBox", but MusicBox only layers it as element 2 while Vibes plays
+        # it alone as its whole sound. It is a vibraphone.
         by_wave_no = {}
         for v in self.prog.voices():
-            for i in range(2 if v.mode else 1):
+            dual = v.mode == 1
+            for i in range(2 if dual else 1):
+                role = 2 if (dual and i == 1) else (1 if dual else 0)
                 by_wave_no.setdefault(v.element(i).wave_no, []).append(
-                    (v.index, v.name)
+                    (role, v.index, v.name, i, dual)
                 )
 
         for wave_no in range(layout.NUM_WAVE_NOS):
-            users = by_wave_no.get(wave_no, [])
+            users = sorted(by_wave_no.get(wave_no, []))
             if not users:
                 self.wave_no_names[wave_no] = ""
                 continue
-            seen = []
-            for _, name in sorted(users):
-                if name not in seen:
-                    seen.append(name)
-            self.wave_no_names[wave_no] = seen[0]
-            self.wave_no_users[wave_no] = seen
+            self.wave_no_names[wave_no] = users[0][2]
+            seen, ordered = set(), []
+            for role, idx, name, slot, dual in users:
+                if name in seen:
+                    continue
+                seen.add(name)
+                ordered.append((name, ROLE_NAMES[role]))
+            self.wave_no_users[wave_no] = ordered
 
         # Which sample sets and drum sounds point at each wave table slot.
         for wave_no in range(layout.NUM_WAVE_NOS):
             label = self.wave_no_names.get(wave_no, "")
             if not label:
                 continue
+            weak = self.is_weak(wave_no)
             for ss in self.prog.sample_sets_for(wave_no):
+                span = note_range(ss.note_low, ss.note_high)
                 self.wave_users.setdefault(ss.wave_index, []).append(
-                    f"{label} {note_range(ss.note_low, ss.note_high)}"
+                    f"{label} {span}"
+                )
+                self.wave_refs.setdefault(ss.wave_index, []).append(
+                    {
+                        "kind": "voice",
+                        "wave_no": wave_no,
+                        "name": label,
+                        "roles": self.voice_roles(wave_no),
+                        "weak": weak,
+                        "range": span,
+                    }
                 )
 
         for kit in self.prog.drum_kits():
@@ -194,6 +244,15 @@ class Names:
                 ds = self.prog.drum_sound(kit.sound_index(note))
                 self.wave_users.setdefault(ds.wave_index, []).append(
                     f"{kit.name} {percussion_name(note)}"
+                )
+                self.wave_refs.setdefault(ds.wave_index, []).append(
+                    {
+                        "kind": "drum",
+                        "name": f"{kit.name} {percussion_name(note)}",
+                        "roles": f"{kit.name} kit",
+                        "weak": False,
+                        "range": note_name(note),
+                    }
                 )
 
         for index in range(layout.NUM_WAVES):
@@ -209,12 +268,50 @@ class Names:
     def wave(self, index):
         return self.wave_names.get(index, "")
 
+    def is_weak(self, wave_no):
+        """True when no voice plays this wave number on its own.
+
+        A wave only ever heard as a layer inside a thicker sound gives very
+        little evidence of what the recording actually is, so the name it gets
+        is a guess and the interface should say so.
+        """
+        users = self.voices_using(wave_no)
+        return bool(users) and not any(role == "whole voice" for _, role in users)
+
+    def wave_is_weak(self, index):
+        refs = self.wave_refs.get(index, [])
+        voice_refs = [r for r in refs if r["kind"] == "voice"]
+        return bool(voice_refs) and all(r["weak"] for r in voice_refs)
+
+    def describe_wave(self, index):
+        """Lines explaining where a wave slot is used, for the detail panel."""
+        refs = self.wave_refs.get(index, [])
+        if not refs:
+            return ["Nothing in the program ROM refers to this wave."]
+        out = []
+        for r in refs:
+            if r["kind"] == "drum":
+                out.append(f"{r['name']}  ({r['range']})")
+            else:
+                mark = "  name is a guess" if r["weak"] else ""
+                out.append(
+                    f"wave no {r['wave_no']}  {r['range']}  played by "
+                    f"{r['roles']}{mark}"
+                )
+        return out
+
     def wave_no(self, wave_no):
         """Name of a wave number, or a plain label if nothing uses it."""
         return self.wave_no_names.get(wave_no) or f"wave no {wave_no}"
 
     def voices_using(self, wave_no):
+        """[(voice name, how it is used)] for a wave number."""
         return self.wave_no_users.get(wave_no, [])
+
+    def voice_roles(self, wave_no):
+        """Readable summary of every voice that plays a wave number."""
+        users = self.voices_using(wave_no)
+        return ", ".join(f"{name} ({role})" for name, role in users)
 
     def users_of(self, index):
         return self.wave_users.get(index, [])

@@ -1,5 +1,6 @@
 """The wave table tab: browse, preview, audition, export and replace waves."""
 
+import wave as wave_module
 from pathlib import Path
 
 import numpy as np
@@ -35,6 +36,7 @@ class WavesTab(QtWidgets.QWidget):
         self.names = None
         self._wave = None
         self._loading = False
+        self._keep_status = False
         self._player = audio.Player(self)
         self._build()
 
@@ -79,6 +81,12 @@ class WavesTab(QtWidgets.QWidget):
         self.status = QtWidgets.QLabel("")
         self.status.setStyleSheet("color: #8b93a5;")
         rv.addWidget(self.status)
+
+        self.usage = QtWidgets.QPlainTextEdit()
+        self.usage.setReadOnly(True)
+        self.usage.setMaximumHeight(84)
+        self.usage.setStyleSheet("color: #a8b0c0;")
+        rv.addWidget(self.usage)
 
         rv.addLayout(self._build_transport())
         rv.addWidget(self._build_editor())
@@ -134,11 +142,23 @@ class WavesTab(QtWidgets.QWidget):
         grid = QtWidgets.QGridLayout(box)
         self.spins = {}
 
+        self.one_shot = QtWidgets.QCheckBox("One shot")
+        self.one_shot.setToolTip(
+            "A single hit that plays through once and stops. The format has no "
+            "loop flag, so this sets the loop point to the end of the wave."
+        )
+        self.one_shot.toggled.connect(self._on_one_shot)
+        grid.addWidget(self.one_shot, 0, 0)
+
         self.loop_spin = QtWidgets.QSpinBox()
         self.loop_spin.setRange(0, 0xFFFF)
         self.loop_spin.valueChanged.connect(self._on_loop_spin)
-        grid.addWidget(QtWidgets.QLabel("Loop point"), 0, 0)
-        grid.addWidget(self.loop_spin, 0, 1)
+        grid.addWidget(QtWidgets.QLabel("Loop point"), 0, 1)
+        grid.addWidget(self.loop_spin, 0, 2)
+
+        self.loop_window = QtWidgets.QLabel("")
+        self.loop_window.setStyleSheet("color: #8b93a5;")
+        grid.addWidget(self.loop_window, 0, 3)
 
         for i, (label, attr, top) in enumerate(HEADER_FIELDS, start=1):
             spin = QtWidgets.QSpinBox()
@@ -147,12 +167,12 @@ class WavesTab(QtWidgets.QWidget):
                 lambda value, a=attr: self._on_field(a, value)
             )
             self.spins[attr] = spin
-            col = ((i) // 5) * 2
-            row = (i) % 5
+            col = ((i - 1) // 3) * 2
+            row = 1 + ((i - 1) % 3)
             grid.addWidget(QtWidgets.QLabel(label), row, col)
             grid.addWidget(spin, row, col + 1)
 
-        grid.setColumnStretch(5, 1)
+        grid.setColumnStretch(6, 1)
         return box
 
     def set_roms(self, sample_rom, program_rom=None, names=None):
@@ -180,7 +200,7 @@ class WavesTab(QtWidgets.QWidget):
             summary = "" if empty else (str(len(used)) if used else "-")
             cells = [
                 str(w.index),
-                "" if empty else (self.names.wave(w.index) if self.names else ""),
+                "" if empty else self._list_name(w.index),
                 "" if empty else str(w.length),
                 "" if empty else (str(w.loop) if w.loops else "one shot"),
                 summary,
@@ -201,6 +221,14 @@ class WavesTab(QtWidgets.QWidget):
         if self.table.rowCount():
             self.table.selectRow(0)
 
+    def _list_name(self, index):
+        if self.names is None:
+            return ""
+        label = self.names.wave(index)
+        if label and self.names.wave_is_weak(index):
+            label += "  (?)"
+        return label
+
     def _selected_index(self):
         items = self.table.selectedItems()
         if not items:
@@ -208,7 +236,9 @@ class WavesTab(QtWidgets.QWidget):
         return items[0].data(QtCore.Qt.UserRole)
 
     def _on_select(self):
-        self.status.clear()
+        if not self._keep_status:
+            self.status.clear()
+        self._keep_status = False
         idx = self._selected_index()
         if idx is None or self.rom is None:
             return
@@ -224,19 +254,38 @@ class WavesTab(QtWidgets.QWidget):
             if w.is_empty:
                 self.view.clear()
                 self.info.setText(f"Wave {w.index} is an unused slot.")
+                self.usage.clear()
                 for spin in self.spins.values():
                     spin.setEnabled(False)
                 self.loop_spin.setEnabled(False)
+                self.one_shot.setEnabled(False)
+                self.loop_window.clear()
                 return
 
             for spin in self.spins.values():
                 spin.setEnabled(True)
-            self.loop_spin.setEnabled(True)
+            self.one_shot.setEnabled(True)
 
-            samples = w.samples()
+            try:
+                samples = w.samples()
+            except ValueError as exc:
+                self.view.clear()
+                self.usage.clear()
+                self.info.setText(
+                    f"Wave {w.index} has a header pointing outside the ROM, so "
+                    f"its audio cannot be read: {exc}"
+                )
+                for spin in self.spins.values():
+                    spin.setEnabled(False)
+                self.loop_spin.setEnabled(False)
+                self.one_shot.setEnabled(False)
+                return
             self.view.set_wave(samples, w.loop, w.loops)
             self.loop_spin.setMaximum(max(0, w.length))
             self.loop_spin.setValue(w.loop)
+            self.one_shot.setChecked(w.one_shot)
+            self.loop_spin.setEnabled(not w.one_shot)
+            self._update_loop_window(w)
             for attr, spin in self.spins.items():
                 spin.setValue(getattr(w, attr))
 
@@ -249,6 +298,20 @@ class WavesTab(QtWidgets.QWidget):
                 f"{w.length} samples ({secs:.3f} s at {NATIVE_SAMPLE_RATE:.0f} Hz)    "
                 f"{w.byte_length} bytes    peak {int(abs(samples).max()) if len(samples) else 0}"
             )
+            if w.has_known_bad_loop and w.loops:
+                text += (
+                    f"\nThis is a single hit whose loop point sits {w.loop_window} "
+                    f"samples before the end, so the hardware repeats a sliver of "
+                    f"near silence instead of stopping. TG101 disables the loop on "
+                    f"this wave. Tick One shot to do the same, or use Tools to fix "
+                    f"all {len(self.rom.waves_with_known_bad_loops())} of them at once."
+                )
+            elif w.loops and 0 < w.loop_window <= 32:
+                text += (
+                    f"\nOnly {w.loop_window} samples repeat, which usually means a "
+                    f"leftover loop point on what is really a single hit. TG101 does "
+                    f"not flag this one, so check it by ear before changing it."
+                )
             if swallowed:
                 text += (
                     f"\nThis wave runs straight across {len(swallowed)} whole other waves "
@@ -260,11 +323,17 @@ class WavesTab(QtWidgets.QWidget):
                     f"sound you can edit safely."
                 )
             elif shared:
+                named = []
+                for i in shared[:6]:
+                    label = self.names.wave(i) if self.names else ""
+                    named.append(f"{i} ({label})" if label else str(i))
                 text += (
-                    f"\nShares ROM data with wave(s) {', '.join(str(i) for i in shared[:10])}"
-                    f"{', ...' if len(shared) > 10 else ''}, editing affects them too."
+                    f"\nSame ROM data as wave {', '.join(named)}"
+                    f"{', and more' if len(shared) > 6 else ''}. Editing the audio "
+                    f"changes all of them, though each keeps its own loop and envelope."
                 )
             self.info.setText(text)
+            self._fill_usage(w)
         finally:
             self._loading = False
 
@@ -274,11 +343,65 @@ class WavesTab(QtWidgets.QWidget):
         setattr(self._wave, attr, value)
         self.romChanged.emit()
 
+    def _fill_usage(self, w):
+        if self.names is None:
+            self.usage.setPlainText("Load a program ROM to see what uses this wave.")
+            return
+        lines = list(self.names.describe_wave(w.index))
+        if self.names.wave_is_weak(w.index):
+            lines.insert(
+                0,
+                "The sample ROM stores no names. This one is inferred only from "
+                "voices that layer it, never from one that plays it alone, so "
+                "treat the name as a guess.",
+            )
+        self.usage.setPlainText("\n".join(lines))
+
+    def _update_loop_window(self, w):
+        if w.one_shot:
+            self.loop_window.setText("plays once and stops")
+        else:
+            secs = w.loop_window / NATIVE_SAMPLE_RATE
+            self.loop_window.setText(
+                f"{w.loop_window} samples repeat ({secs * 1000:.1f} ms)"
+            )
+
+    def _on_one_shot(self, checked):
+        if self._loading or self._wave is None or self._wave.is_empty:
+            return
+        w = self._wave
+        if checked:
+            self._last_loop = w.loop
+            w.make_one_shot()
+        else:
+            w.set_looping(True, getattr(self, "_last_loop", 0))
+        self._loading = True
+        try:
+            self.loop_spin.setValue(w.loop)
+            self.loop_spin.setEnabled(not w.one_shot)
+        finally:
+            self._loading = False
+        self.view.set_wave(w.samples(), w.loop, w.loops)
+        self._update_loop_window(w)
+        self._refresh_row()
+        self.romChanged.emit()
+
+    def _refresh_row(self):
+        row = self.table.currentRow()
+        w = self._wave
+        if row < 0 or w is None:
+            return
+        item = self.table.item(row, 3)
+        if item is not None:
+            item.setText(str(w.loop) if w.loops else "one shot")
+
     def _on_loop_spin(self, value):
         if self._loading or self._wave is None:
             return
         self._wave.loop = value
         self.view.set_wave(self._wave.samples(), self._wave.loop, self._wave.loops)
+        self._update_loop_window(self._wave)
+        self._refresh_row()
         self.romChanged.emit()
 
     def _on_loop_dragged(self, pos):
@@ -329,7 +452,7 @@ class WavesTab(QtWidgets.QWidget):
 
         try:
             samples, rate = codec.read_wav(path)
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, wave_module.Error) as exc:
             QtWidgets.QMessageBox.warning(self, "Could not read WAV", str(exc))
             return
 
@@ -357,6 +480,7 @@ class WavesTab(QtWidgets.QWidget):
                 f"table runs at {NATIVE_SAMPLE_RATE:.0f} Hz, so it will play back "
                 f"{'sharp' if rate < NATIVE_SAMPLE_RATE else 'flat'}."
             )
+        self._keep_status = True
         self.reload()
         self._select_index(w.index)
         self.romChanged.emit()

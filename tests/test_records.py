@@ -123,3 +123,119 @@ def test_drum_sound_shares_a_byte_between_pan_and_reverb(blank_program):
     ds.pan = 12
     ds.reverb_depth = 4
     assert (ds.pan, ds.reverb_depth) == (12, 4)
+
+
+def test_one_shot_is_encoded_as_loop_at_the_end(blank_sample):
+    w = WaveHeader(blank_sample, 9)
+    w.length = 500
+    w.loop = 100
+    assert w.loops is True
+    assert w.one_shot is False
+    assert w.loop_window == 400
+
+    w.make_one_shot()
+    assert w.one_shot is True
+    assert w.loops is False
+    assert w.loop == 500
+    assert w.loop_window == 0
+
+
+def test_set_looping_round_trips(blank_sample):
+    w = WaveHeader(blank_sample, 10)
+    w.length = 800
+    w.set_looping(False)
+    assert w.one_shot is True
+    w.set_looping(True, 250)
+    assert w.loops is True
+    assert w.loop == 250
+
+
+def test_set_looping_clamps_inside_the_wave(blank_sample):
+    w = WaveHeader(blank_sample, 11)
+    w.length = 100
+    w.set_looping(True, 5000)
+    assert w.loop == 99
+    assert w.loops is True
+
+
+def test_known_bad_loop_list_is_the_tg101_one():
+    from tg100.waves import KNOWN_BAD_LOOPS
+
+    assert len(KNOWN_BAD_LOOPS) == 64
+    for expected in (11, 29, 38, 209, 449, 511):
+        assert expected in KNOWN_BAD_LOOPS
+
+
+def test_no_voice_bank_can_reach_voice_memory(blank_program):
+    """A fifth bank would start at 0x10400 and run 240 bytes into voice 0.
+
+    That is not hypothetical: the editor used to offer a Drums bank there, and
+    writing to it overwrote voice names and element data.
+    """
+    for i in range(layout.NUM_VOICE_BANKS):
+        bank = blank_program.bank(i)
+        assert bank.offset + bank.size <= layout.VOICE_MEM
+
+
+def test_a_fifth_bank_is_refused(blank_program):
+    with pytest.raises(IndexError):
+        blank_program.bank(layout.NUM_VOICE_BANKS)
+
+
+def test_bank_names_match_bank_count():
+    assert len(layout.VOICE_BANK_NAMES) == layout.NUM_VOICE_BANKS
+
+
+def test_editing_every_bank_leaves_voice_memory_alone(blank_program):
+    before = bytes(blank_program.data[layout.VOICE_MEM :])
+    for i in range(layout.NUM_VOICE_BANKS):
+        bank = blank_program.bank(i)
+        for program in range(128):
+            bank.set_voice_index(program, 99)
+    assert bytes(blank_program.data[layout.VOICE_MEM :]) == before
+
+
+def test_native_sample_rate_is_the_hardware_clock():
+    """9.4 MHz divided by 224, from TG101. Guessing this makes every export flat."""
+    from tg100.waves import NATIVE_SAMPLE_RATE
+
+    assert NATIVE_SAMPLE_RATE == 9.4e6 / 224.0
+    assert round(NATIVE_SAMPLE_RATE, 4) == 41964.2857
+
+
+def test_writing_an_odd_wave_keeps_the_neighbours_nibble(blank_sample):
+    """An odd sample count shares its final byte with whatever follows.
+
+    Waves 47 and 52 overlap on byte 0x05F5F3 in the factory ROM exactly this
+    way, so zeroing the spare nibble corrupts an unrelated sound.
+    """
+    import numpy as np
+
+    w = WaveHeader(blank_sample, 0)
+    w.start = 0x2000
+    w.length = 3
+    blank_sample.data[0x2000 + 4] = 0xAB  # the byte holding the spare nibble
+    w.write_samples(np.array([100, -100, 50], dtype="i2"))
+    assert blank_sample.data[0x2000 + 4] & 0xF0 == 0xA0
+
+
+def test_write_samples_refuses_too_many_samples_before_touching_the_rom(blank_sample):
+    import numpy as np
+
+    w = WaveHeader(blank_sample, 0)
+    w.start = 0x2000
+    w.length = 100
+    before = bytes(blank_sample.data)
+    with pytest.raises(ValueError, match="65535"):
+        w.write_samples(np.zeros(70000, dtype="i2"), relocate=True)
+    assert bytes(blank_sample.data) == before
+
+
+def test_saving_does_not_destroy_the_known_dump_flag(blank_program, tmp_path):
+    blank_program._original_sha1 = blank_program.expected_sha1
+    assert blank_program.is_known_dump is True
+    blank_program.voice(0).name = "Edited"
+    blank_program.save(tmp_path / "out.bin")
+    blank_program.mark_saved()
+    assert blank_program.is_known_dump is True
+    assert blank_program.modified is False

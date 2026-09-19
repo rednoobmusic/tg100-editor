@@ -15,7 +15,7 @@ SMPL_ROM_SHA1 = "32ec77a46f4d005538c735f56ad48fa7243c63be"
 
 # program ROM
 VOICE_BANK_TBL = 0x14C90       # 128 bytes, midi bank number to bank index
-BANK_GM = 0x10000              # four banks of 256 bytes, GM DOC CM64a CM64b Drums
+BANK_GM = 0x10000              # FOUR banks of 256 bytes, GM DOC CM64a CM64b
 BANK_INTERNAL = 0x14D10        # 256 bytes
 VOICE_MEM = 0x10410            # 192 voices
 DRUM_BANK = 0x14C10            # 128 bytes, program number to kit index
@@ -40,7 +40,11 @@ VOICE_ELEMENT_SIZE = 36
 VOICE_NAME_OFS = 16
 VOICE_NAME_LEN = 8
 NUM_VOICES = 192
-NUM_VOICE_BANKS = 5
+# Four, not five. TG101 copies (kNumVoiceBanks - 1) = 4 banks from here, and its
+# Drums entry falls back to General MIDI rather than having a table of its own.
+# A fifth bank would start at 0x10400, which holds the firmware version string
+# and then runs 240 bytes into voice memory, so writing to it destroys voice 0.
+NUM_VOICE_BANKS = 4
 NUM_SAMPLE_SETS = 383
 SAMPLE_SET_SIZE = 9
 NUM_WAVE_NOS = 140
@@ -74,5 +78,9 @@ VOICE_BANK_NAMES = (
     "Disk Orchestra",
     "C/M 64 parts 1-9",
     "C/M 64 parts 11-16",
-    "Drums",
 )
+
+# ASCII build stamp sitting between the bank block and voice memory, reading
+# "#0068  VER=1.10 " in the dump this was checked against.
+FIRMWARE_STAMP = 0x10400
+FIRMWARE_STAMP_LEN = 16

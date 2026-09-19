@@ -29,9 +29,30 @@ FORMAT_NAMES = {
     FORMAT_12_BIT: "12 bit",
 }
 
-# The chip clocks the wave table at this rate. Everything else is a pitch shift
-# away from it, so it is what a raw dump of a wave should be played back at.
-NATIVE_SAMPLE_RATE = 33075.0
+# The chip clocks the wave table at 9.4 MHz divided by 224. Everything else is a
+# pitch shift away from it, so it is the rate a raw dump of a wave plays at.
+# Taken from TG101 (WaveTbl.cpp mNativeSampleRate, WaveGen.cpp 9.4e+06 / 224.0),
+# not guessed.
+NATIVE_SAMPLE_RATE = 9.4e6 / 224.0  # 41964.285714285714
+
+# Waves TaleTN's TG101 disables looping on when it loads the ROM, because their
+# loop point sits a handful of samples before the end and the chip would sit
+# there repeating a sliver of silence instead of stopping. They are single hits:
+# measured against the v1.10 dump, 95% of them have decayed to under 2% of peak
+# by the last twentieth of the sample, against 14% of every other wave.
+#
+# This is TG101's hand picked list, kept verbatim. It is deliberately NOT a rule
+# computed from the data, because no simple one reproduces it. Loop windows here
+# run from 3 to 31 samples, and a window threshold wide enough to catch all 64
+# also catches 89 waves TG101 leaves alone. So the list is data, not a heuristic.
+KNOWN_BAD_LOOPS = frozenset({
+    11, 16, 17, 29, 30, 32, 35, 36, 37, 38, 51, 52, 54, 55, 69,
+    185, 186, 209, 211, 219, 220, 224, 226, 264, 265, 270, 271,
+    280, 281, 282, 284, 294, 301, 304, 305, 308, 320, 337, 338,
+    345, 348, 349, 351, 354, 356, 357, 360, 361, 366, 373, 374,
+    375, 388, 395, 396, 397, 404, 414, 430, 443, 444, 447, 449,
+    511,
+})
 
 
 class WaveHeader:
@@ -114,6 +135,34 @@ class WaveHeader:
     @property
     def loops(self):
         return self.loop < self.length
+
+    @property
+    def one_shot(self):
+        """True if the wave plays through once and stops."""
+        return not self.loops
+
+    @property
+    def loop_window(self):
+        """How many samples repeat. A handful means a vestigial loop."""
+        return max(0, self.length - self.loop) if self.loops else 0
+
+    @property
+    def has_known_bad_loop(self):
+        return self.index in KNOWN_BAD_LOOPS
+
+    def make_one_shot(self):
+        """Stop the wave looping, the way the hardware expects for a single hit.
+
+        Setting the loop point to the end is how the format says "do not loop".
+        There is no separate flag.
+        """
+        self.loop = self.length
+
+    def set_looping(self, on, loop_point=0):
+        if on:
+            self.loop = min(loop_point, max(0, self.length - 1))
+        else:
+            self.make_one_shot()
 
     @property
     def byte_length(self):
@@ -230,11 +279,33 @@ class WaveHeader:
                 f"{self.byte_length}, pass relocate=True to move it"
             )
 
+        count = len(samples)
+        if not 0 <= count <= 0xFFFF:
+            raise ValueError(
+                f"a wave holds at most 65535 samples, got {count}"
+            )
+        if dest + need > len(self.rom.data):
+            raise ValueError(
+                f"wave would run past the end of the ROM at 0x{dest + need:06X}"
+            )
+
         blob = codec.pack(samples)
+        if count % 2 and blob:
+            # An odd sample count leaves the high nibble of the final byte to
+            # whatever comes next, which in this ROM is sometimes another wave's
+            # audio. Wave 47 and wave 52 share byte 0x05F5F3 exactly like this,
+            # so the nibble is read back and kept rather than zeroed.
+            tail = dest + len(blob) - 1
+            blob = blob[:-1] + bytes(
+                [(blob[-1] & 0x0F) | (self.rom.data[tail] & 0xF0)]
+            )
+
+        was_one_shot = self.one_shot
         self.rom.data[dest : dest + len(blob)] = blob
         self.start = dest
-        self.length = len(samples)
-        if self.loop >= self.length:
+        self.length = count
+        # A wave that was a single hit stays one, whether it grew or shrank.
+        if was_one_shot or self.loop >= self.length:
             self.loop = self.length
 
     def describe(self):

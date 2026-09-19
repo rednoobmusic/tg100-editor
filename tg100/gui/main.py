@@ -96,6 +96,12 @@ class MainWindow(QtWidgets.QMainWindow):
         act.triggered.connect(self.close)
         f.addAction(act)
 
+        t = bar.addMenu("&Tools")
+        self.fix_loops_act = QtGui.QAction("Make known single hits one shots...", self)
+        self.fix_loops_act.triggered.connect(self.fix_bad_loops)
+        self.fix_loops_act.setEnabled(False)
+        t.addAction(self.fix_loops_act)
+
         h = bar.addMenu("&Help")
         act = QtGui.QAction("&About", self)
         act.triggered.connect(self._about)
@@ -143,7 +149,43 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._remember(path)
         self.save_smpl_act.setEnabled(True)
+        self.fix_loops_act.setEnabled(True)
         self.waves.set_roms(self.smpl, self.prog, self.names)
+        self._update_status()
+
+    def fix_bad_loops(self):
+        """Turn the waves TG101 treats as single hits into one shots."""
+        if self.smpl is None:
+            return
+        pending = self.smpl.waves_with_known_bad_loops()
+        if not pending:
+            QtWidgets.QMessageBox.information(
+                self, "Nothing to fix",
+                "Every wave on the known list is already a one shot.",
+            )
+            return
+
+        listing = ", ".join(str(w.index) for w in pending[:24])
+        if len(pending) > 24:
+            listing += f", and {len(pending) - 24} more"
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            "Make single hits one shots",
+            f"{len(pending)} waves are single hits whose loop point sits a few "
+            f"samples before the end, so the hardware repeats a sliver of near "
+            f"silence rather than stopping.\n\nThis sets each one's loop point to "
+            f"its end, which is how the format says do not loop. It changes the "
+            f"sample ROM, and nothing is written to disk until you save.\n\n"
+            f"Waves: {listing}\n\nGo ahead?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No,
+        )
+        if answer != QtWidgets.QMessageBox.Yes:
+            return
+
+        changed = self.smpl.fix_known_bad_loops()
+        self.waves.reload()
+        self.status.showMessage(f"Made {len(changed)} waves one shots", 8000)
         self._update_status()
 
     def save_sample(self):

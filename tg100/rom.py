@@ -27,7 +27,10 @@ class _RomImage:
                 f"{self.label} should be {self.size} bytes, got {len(data)}"
             )
         self.data = bytearray(data)
-        self._loaded_sha1 = hashlib.sha1(bytes(data)).hexdigest()
+        # Two separate things. One never changes, so the known dump warning
+        # stays honest after a save, the other tracks unsaved edits.
+        self._original_sha1 = hashlib.sha1(bytes(data)).hexdigest()
+        self._saved_sha1 = self._original_sha1
 
     @classmethod
     def load(cls, path):
@@ -49,21 +52,22 @@ class _RomImage:
     @property
     def is_known_dump(self):
         """True if this is the dump every offset here was checked against."""
-        return self._loaded_sha1 == self.expected_sha1
+        return self._original_sha1 == self.expected_sha1
 
     @property
     def modified(self):
-        return self.sha1 != self._loaded_sha1
+        return self.sha1 != self._saved_sha1
 
     def save(self, path=None):
         target = Path(path) if path else self.path
         if target is None:
             raise RomError("no path to save to")
         target.write_bytes(bytes(self.data))
+        self.path = target
         return target
 
     def mark_saved(self):
-        self._loaded_sha1 = self.sha1
+        self._saved_sha1 = self.sha1
 
 
 class ProgramRom(_RomImage):
@@ -83,14 +87,33 @@ class ProgramRom(_RomImage):
         return [v.name for v in self.voices()]
 
     def bank(self, index):
-        """Banks 0..3 are the GM block, 4 is Drums, -1 is Internal."""
+        """Banks 0..3 sit in the block at 0x10000, -1 is Internal.
+
+        There is no fifth bank. The address a fifth would occupy holds the
+        firmware version string and then overlaps voice memory, so asking for
+        one is refused rather than quietly handing back somewhere to write.
+        """
         if index == -1:
             return VoiceBank(self, layout.BANK_INTERNAL, "Internal")
         if not 0 <= index < layout.NUM_VOICE_BANKS:
-            raise IndexError(f"bank index out of range: {index}")
-        return VoiceBank(
-            self, layout.BANK_GM + index * 256, layout.VOICE_BANK_NAMES[index]
+            raise IndexError(
+                f"bank index out of range: {index}, the ROM has "
+                f"{layout.NUM_VOICE_BANKS} banks plus Internal"
+            )
+        offset = layout.BANK_GM + index * 256
+        if offset + 256 > layout.VOICE_MEM:
+            raise RomError(
+                f"bank {index} at 0x{offset:05X} would run into voice memory "
+                f"at 0x{layout.VOICE_MEM:05X}"
+            )
+        return VoiceBank(self, offset, layout.VOICE_BANK_NAMES[index])
+
+    def firmware_stamp(self):
+        """The ASCII build stamp between the bank block and voice memory."""
+        raw = bytes(
+            self.data[layout.FIRMWARE_STAMP : layout.FIRMWARE_STAMP + layout.FIRMWARE_STAMP_LEN]
         )
+        return raw.decode("ascii", "replace").strip()
 
     def banks(self):
         return [self.bank(i) for i in range(layout.NUM_VOICE_BANKS)]
@@ -195,6 +218,24 @@ class SampleRom(_RomImage):
             f"({self.free_bytes()} bytes free in total, but fragmented). "
             f"Shorten or remove another wave first."
         )
+
+    def waves_with_known_bad_loops(self):
+        """Waves still looping that TG101 treats as single hits."""
+        from .waves import KNOWN_BAD_LOOPS
+
+        return [
+            w
+            for w in self.used_waves()
+            if w.index in KNOWN_BAD_LOOPS and w.loops
+        ]
+
+    def fix_known_bad_loops(self):
+        """Turn every known bad loop into a one shot. Returns the indices changed."""
+        changed = []
+        for w in self.waves_with_known_bad_loops():
+            w.make_one_shot()
+            changed.append(w.index)
+        return changed
 
     def contains_waves(self, index):
         """Other waves whose audio sits entirely inside this one.

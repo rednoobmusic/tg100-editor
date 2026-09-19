@@ -38,6 +38,15 @@ with the loop region shaded, zoom down to individual samples, and audition at
 any pitch. Export any wave to WAV and replace it from a WAV. The per wave LFO,
 vibrato, tremolo and five stage amplitude envelope are editable.
 
+There is a One shot tick box, because the format has no loop flag and encodes a
+single hit as a loop point sitting on the end of the wave. Nobody would guess
+that from a loop point box, so the interface says it in words and shows how many
+samples actually repeat. Sixty four waves in the factory ROM are single hits
+whose loop point sits three to thirty one samples early, which leaves the
+hardware repeating a sliver of near silence instead of stopping. TG101 disables
+those on load. Tools has a menu item that does the same here, and each of them
+says so when you select it.
+
 **Voices.** All 192 voices, both elements, with names you can edit and every
 parameter labelled. Values that have a neutral point show it, so detune 64
 reads as "centre" and note shift 76 reads as "+12 semitones" rather than
@@ -46,10 +55,13 @@ leaving you to work it out.
 **Drums.** Ten kits with proper percussion names, and the drum sounds behind
 them. The list says how many kits share each sound before you change it.
 
-**Banks.** The six program change maps, with the General MIDI name alongside so
-you can see where Yamaha's choice differs from the standard.
+**Banks.** The Internal map plus the four in the block at `0x10000`, with the
+General MIDI name alongside so you can see where Yamaha's choice differs from
+the standard. There is no fifth bank, whatever the voice bank names might
+suggest. The address one would occupy holds the firmware build stamp and then
+runs 240 bytes into voice memory.
 
-## Two things worth knowing before you edit
+## Three things worth knowing before you edit
 
 **The sample ROM is full.** There are 144 free bytes across 142 gaps, and the
 largest is 3 bytes. A longer replacement sample has to go somewhere, so the
@@ -62,6 +74,25 @@ Wave 2, 143 and 144 are the same recording, and ten headers share the region at
 replacing one wave can change several sounds at once. The editor warns you and
 names the others.
 
+One wave is worth singling out. Wave 45 stores its length as the word `0x0006`,
+which decodes to 65530 samples, and it is the only wave in the ROM past 40000.
+It starts where wave 28 starts and runs straight across twenty other waves, so
+most of what you hear in it is bongos and congas and then a choir that has
+nothing to do with it. Both public references decode that field the same way, so
+it is the data that is strange rather than the reading of it. The editor says so
+when you select it.
+
+**Wave names are guesses.** The sample ROM holds no text at all, so there is
+nothing to look up and every name here is worked out from the program ROM. A
+wave is named after the voices that play it, preferring a voice that plays it
+alone over one that only layers it underneath something else. That distinction
+matters more than it sounds. Wave number 10 is played alone by Vibes and layered
+by MusicBox, and naming it after the lower numbered voice would call a
+vibraphone a music box. 41 of the 140 wave numbers have no voice that plays them
+alone at all, so their names rest on nothing but a layer. Those are marked with a
+question mark in the list, and the panel underneath names every voice that uses
+the wave and how, rather than showing you one winner and hiding the rest.
+
 ## ROM layout
 
 Worked out from TaleTN's TG101 engine and vampirefrog's notes, then checked
@@ -70,7 +101,8 @@ the program ROM, with the H8/520 code below it.
 
 | Offset | Contents |
 | --- | --- |
-| `0x10000` | Program change maps for GM, Disk Orchestra, two C/M 64 banks and Drums |
+| `0x10000` | Program change maps, four banks: GM, Disk Orchestra, two C/M 64 |
+| `0x10400` | ASCII build stamp, `#0068  VER=1.10` in this dump |
 | `0x10410` | 192 voices, 96 bytes each |
 | `0x14C10` | Program number to drum kit |
 | `0x14C90` | MIDI bank select to bank index |
@@ -89,7 +121,9 @@ the program ROM, with the H8/520 code below it.
 | `0x18B9E` | 10 drum kits, 256 bytes each |
 
 The sample ROM is simpler: 512 headers of 12 bytes at the start, then packed
-12 bit PCM from `0x1800` to the very end of the 2M.
+12 bit PCM from `0x1800` to the very end of the 2M. The wave table clocks at
+9.4 MHz divided by 224, or 41964.29 Hz, which is the rate an exported wave
+plays back at.
 
 ## A note on the sample format
 
