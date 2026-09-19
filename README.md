@@ -78,6 +78,21 @@ snap a loop point to the nearest zero crossing, and search for a loop whose
 seam matches the tail. The loop search declines rather than guessing when a
 wave has decayed into silence, because a single hit has nothing to loop.
 
+**Sysex.** Reads and writes the TG100's system exclusive dumps, so an edit can
+be heard on real hardware without burning anything. Pick a voice, send it to
+one of the module's 64 internal slots over MIDI, and listen. The format was
+worked out from 24 captures off one owner's module rather than assumed from
+other Yamaha gear of the period, and the whole corpus round trips byte for
+byte. There is one message shape, not the two the era usually uses:
+
+```
+F0 43 1n 27 <a2> <a1> <a0> <data ...> <checksum> F7
+```
+
+A 21 bit address carried as three seven bit bytes, and a two's complement
+checksum over the address and the data. All 4017 messages in the corpus satisfy
+it, as do the five Yamaha wrote into the ROM's own demo song.
+
 **Banks.** The Internal map plus the four in the block at `0x10000`, with the
 General MIDI name alongside so you can see where Yamaha's choice differs from
 the standard. There is no fifth bank, whatever the voice bank names might
@@ -177,6 +192,64 @@ second difference, the order above is smoother on 439 waves against 18 for
 TG101's, and real recorded audio is correlated sample to sample where a
 misplaced nibble is not. Set `NIBBLE_ORDER_TG101` in `tg100/codec.py` if a
 hardware capture ever settles it the other way.
+
+## Talking to the hardware
+
+`tg100.sysex` reads and writes the TG100's own MIDI system exclusive dumps, so
+a voice edited here can be sent to a real module and heard without reflashing
+anything. The format was worked out from 24 dumps taken off one owner's TG100
+and checked against the firmware, and every one of those files comes back out
+of this code byte for byte.
+
+There is only one message. Bulk dumps and single parameter changes are the same
+thing at different lengths:
+
+```
+F0 43 1n 27 <a2> <a1> <a0> <data ...> <checksum> F7
+```
+
+`n` is the device number, `27` is the model, and the three address bytes carry
+seven bits each, high first, so the address is `a2 << 14 | a1 << 7 | a0`. The
+checksum is `(-sum(address + data)) & 0x7F`. The demo song in the program ROM
+proves the one byte case: at `0x19643` it changes the reverb type mid song with
+`F0 43 10 27 30 00 0A 00 46 F7`.
+
+Two address regions appear, and each message carries exactly one record:
+
+| Address | Size | What it is |
+| --- | --- | --- |
+| `0x0C0000` | 10 | system: master tune, transpose, device number, master volume |
+| `0x0C000A` | 6 | reverb type, time and output level, then three unused bytes |
+| `0x0C0010` | 384 | 16 parts of 24 bytes |
+| `0x0C0190` | 6144 | 64 voices of 96 bytes, the voice RAM |
+| `0x0C1990` | 246 | 82 drum setups of 3 bytes, notes 27 to 108 |
+| `0x090000` | 1024 | the four program change maps, the RAM copy of `0x10000` |
+
+The voice record is the same 96 bytes as in the program ROM, so
+`tg100.voices.Voice` reads both. The 64 voices at `0x0C0190` are the internal
+voice RAM, which MIDI bank numbers 64 to 111 select, and they start out as a
+copy of the first 64 ROM voices. That is the route from this editor to a real
+module: write a voice into a RAM slot, then select bank 64 and its program
+number on a part.
+
+Part slot 0 is the drum part, which the front panel calls part 10. Slots 1 to 9
+are parts 1 to 9 and slots 10 to 15 are parts 11 to 16, so the slot number and
+the part number are not the same.
+
+The hardware sends two dump styles and this writes both. `"all"` is 168
+messages and 9323 bytes, ending with the system block because that block holds
+the device number and changing it halfway through would orphan the rest.
+`"setup"` is 164 messages and 8266 bytes and leaves the program change maps
+out.
+
+```python
+from tg100.sysex import Dump
+
+dump = Dump.load("savestate.syx")
+print(dump.reverb.type_name, dump.part(1).program, dump.voice(0).name)
+dump.voice(0).name = "dingus"
+dump.save("edited.syx")
+```
 
 ## Credits
 

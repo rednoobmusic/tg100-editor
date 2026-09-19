@@ -7,7 +7,7 @@ still present and come back if you switch to dual.
 
 from PySide6 import QtCore, QtWidgets
 
-from .. import layout, naming
+from .. import layout, naming, sysex
 from ..voices import (
     DUAL,
     PITCH_EG_RANGES,
@@ -415,6 +415,14 @@ class VoicesTab(QtWidgets.QWidget):
         new = FieldGrid()
         new.changed.connect(self._on_edit)
         new.add("Name", BoundText(lambda: v.name, self._set_name, 8))
+        send = QtWidgets.QPushButton("Send to hardware as .syx...")
+        send.setToolTip(
+            "Write this voice as a sysex file. Play it into a real TG100 over "
+            "MIDI and it lands in one of the 64 internal voice slots, so you "
+            "can hear an edit without burning anything."
+        )
+        send.clicked.connect(self._export_sysex)
+        new.add_widget("Audition", send)
         new.add(
             "Mode",
             BoundCombo(
@@ -455,6 +463,39 @@ class VoicesTab(QtWidgets.QWidget):
         for panel in self.elements:
             panel.bind(v, self.names)
         self._update_enabled()
+
+    def _export_sysex(self):
+        """One sysex message that writes this voice into the device's RAM."""
+        v = self._voice
+        if v is None:
+            return
+        slot, ok = QtWidgets.QInputDialog.getInt(
+            self, "Internal voice slot",
+            "The TG100 holds 64 voices in RAM. Which one should this overwrite?",
+            0, 0, sysex.NUM_VOICES - 1,
+        )
+        if not ok:
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save sysex", f"{v.name.strip() or 'voice'}.syx",
+            "Sysex files (*.syx)",
+        )
+        if not path:
+            return
+        address = sysex.MULTI_BASE + sysex.VOICES_OFS + slot * layout.VOICE_SIZE
+        message = sysex.encode(address, v.raw())
+        try:
+            with open(path, "wb") as fp:
+                fp.write(message)
+        except OSError as exc:
+            QtWidgets.QMessageBox.warning(self, "Could not save", str(exc))
+            return
+        QtWidgets.QMessageBox.information(
+            self, "Saved",
+            f"Wrote {len(message)} bytes.\n\nSending this to a TG100 puts "
+            f"{v.name.strip()!r} in internal voice {slot}. Select that voice on "
+            f"the module to hear it.",
+        )
 
     def _set_name(self, text):
         """Voice names are ASCII only, so say so instead of dropping the edit."""
