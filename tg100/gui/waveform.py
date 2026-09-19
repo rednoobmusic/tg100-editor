@@ -21,8 +21,7 @@ class WaveformView(QtWidgets.QWidget):
     GRID = QtGui.QColor("#262a33")
     AXIS = QtGui.QColor("#3a404e")
     WAVE = QtGui.QColor("#5ac8fa")
-    PEAK_FILL = QtGui.QColor(90, 200, 250, 90)
-    RMS_FILL = QtGui.QColor(125, 214, 255, 235)
+    RMS_FILL = QtGui.QColor(150, 224, 255, 170)
     WAVE_LOOP = QtGui.QColor("#ffd66b")
     LOOP_FILL = QtGui.QColor(255, 214, 107, 28)
     LOOP_LINE = QtGui.QColor("#ffd66b")
@@ -147,8 +146,8 @@ class WaveformView(QtWidgets.QWidget):
         else:
             super().keyPressEvent(event)
 
-    def _envelope(self, width):
-        """Peak and RMS per pixel column for the visible slice.
+    def _envelope(self, columns):
+        """Peak and RMS per column for the visible slice.
 
         Peaks alone make every busy sample look like a solid block, so the RMS
         goes in as well. The bright inner band is the average level and the
@@ -159,7 +158,7 @@ class WaveformView(QtWidgets.QWidget):
         n = len(view)
         if n == 0:
             return None
-        cols = max(1, min(width, n))
+        cols = max(1, min(int(columns), n))
         edges = np.linspace(0, n, cols + 1).astype(np.int64)
         starts = edges[:-1]
         # reduceat needs strictly increasing indices, so drop empty columns
@@ -174,20 +173,7 @@ class WaveformView(QtWidgets.QWidget):
         counts = np.diff(np.append(starts, n)).astype(np.float64)
         rms = np.sqrt(sums / np.maximum(counts, 1.0))
 
-        xs = starts / n * width
-        return xs, lo, hi, rms
-
-    @staticmethod
-    def _band(xs, upper, lower, mid, scale):
-        """A closed path tracing one edge out and the other back."""
-        path = QtGui.QPainterPath()
-        path.moveTo(float(xs[0]), mid - float(upper[0]) * scale)
-        for x, v in zip(xs[1:], upper[1:]):
-            path.lineTo(float(x), mid - float(v) * scale)
-        for x, v in zip(reversed(xs), reversed(lower)):
-            path.lineTo(float(x), mid - float(v) * scale)
-        path.closeSubpath()
-        return path
+        return starts / n, lo, hi, rms
 
     def paintEvent(self, event):
         p = QtGui.QPainter(self)
@@ -220,42 +206,52 @@ class WaveformView(QtWidgets.QWidget):
         p.setPen(QtGui.QPen(self.AXIS, 1))
         p.drawLine(0, int(mid), w, int(mid))
 
-        env = self._envelope(w)
-        if env is not None:
-            xs, lo, hi, rms = env
-            view_n = min(self._view_len, len(self._samples) - self._view_start)
+        dpr = float(self.devicePixelRatioF() or 1.0)
+        columns = max(1, int(w * dpr))
+        view_n = min(self._view_len, len(self._samples) - self._view_start)
 
-            if view_n <= w:
-                view = self._samples[
-                    self._view_start : self._view_start + self._view_len
-                ]
-                step = w / max(1, view_n)
-                path = QtGui.QPainterPath()
-                for i, v in enumerate(view):
-                    x = i * step
-                    y = mid - float(v) * scale
-                    if i == 0:
-                        path.moveTo(x, y)
-                    else:
-                        path.lineTo(x, y)
-                p.setPen(QtGui.QPen(self.WAVE, 1.4))
-                p.drawPath(path)
-                if view_n < w / 4:
-                    p.setBrush(self.WAVE)
-                    p.setPen(QtCore.Qt.NoPen)
-                    for i, v in enumerate(view):
-                        p.drawEllipse(
-                            QtCore.QPointF(i * step, mid - float(v) * scale), 2.2, 2.2
-                        )
-            elif len(xs) > 1:
+        if view_n <= columns:
+            # Fewer samples than there are pixels to draw them on, so show the
+            # real thing rather than a summary of it.
+            view = self._samples[self._view_start : self._view_start + self._view_len]
+            step = w / max(1, view_n)
+            path = QtGui.QPainterPath()
+            for i, v in enumerate(view):
+                x = i * step
+                y = mid - float(v) * scale
+                if i == 0:
+                    path.moveTo(x, y)
+                else:
+                    path.lineTo(x, y)
+            p.setPen(QtGui.QPen(self.WAVE, 1.4))
+            p.drawPath(path)
+            if view_n < columns / 4:
+                p.setBrush(self.WAVE)
                 p.setPen(QtCore.Qt.NoPen)
-                p.setBrush(self.PEAK_FILL)
-                p.drawPath(self._band(xs, hi, lo, mid, scale))
-                p.setBrush(self.RMS_FILL)
-                p.drawPath(self._band(xs, rms, -rms, mid, scale))
-                p.setPen(QtGui.QPen(self.WAVE, 0.9))
-                p.setBrush(QtCore.Qt.NoBrush)
-                p.drawPath(self._band(xs, hi, lo, mid, scale))
+                for i, v in enumerate(view):
+                    p.drawEllipse(
+                        QtCore.QPointF(i * step, mid - float(v) * scale), 2.2, 2.2
+                    )
+        else:
+            env = self._envelope(columns)
+            if env is not None:
+                fracs, lo, hi, rms = env
+                # One thin vertical line per column, spanning that column's real
+                # minimum and maximum. Nothing is drawn between columns, because
+                # there is no data between columns.
+                thin = 1.0 / dpr
+                p.setPen(QtGui.QPen(self.WAVE, thin))
+                for frac, a, b in zip(fracs, lo, hi):
+                    x = frac * w
+                    y0 = mid - float(b) * scale
+                    y1 = mid - float(a) * scale
+                    p.drawLine(QtCore.QPointF(x, y0), QtCore.QPointF(x, max(y1, y0 + thin)))
+                p.setPen(QtGui.QPen(self.RMS_FILL, thin))
+                for frac, r in zip(fracs, rms):
+                    x = frac * w
+                    y0 = mid - float(r) * scale
+                    y1 = mid + float(r) * scale
+                    p.drawLine(QtCore.QPointF(x, y0), QtCore.QPointF(x, y1))
 
         if self._loops:
             lx = self._sample_to_x(self._loop)

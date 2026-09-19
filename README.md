@@ -33,7 +33,20 @@ python3 tools/tg100dump.py tg100prog.bin tg100smpl.bin export 494 piano.wav
 
 ## What it does
 
-**Waves.** All 512 wave table slots, 489 of which are used. Waveform display
+**Waves.** All 512 wave table slots, 489 of which are used. The list sorts on
+any column and filters as you type, which matters because Yamaha's wave order
+follows the ROM layout rather than anything musical. Sorting by name pulls a
+multisample back together, so Alto Sax reads 1/13 through 13/13 even though
+those thirteen recordings sit at scattered indices. Typing drum, instrument,
+unused or named narrows the list to those.
+
+Since the sample ROM holds no text, every name is a guess. If you listen to one
+and recognise it, type what you hear into the Call it box and that name sticks.
+It is written to a small JSON file beside the ROM, so the ROM itself stays
+exactly what the hardware expects, and the guess stays visible next to your
+name in case you want it back.
+
+Waveform display
 with the loop region shaded, zoom down to individual samples, and audition at
 any pitch. Export any wave to WAV and replace it from a WAV. The per wave LFO,
 vibrato, tremolo and five stage amplitude envelope are editable.

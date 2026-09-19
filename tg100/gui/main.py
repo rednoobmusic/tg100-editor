@@ -48,7 +48,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.drums = DrumsTab()
         self.banks = BanksTab()
         self.tables = TablesTab()
-        for tab in (self.voices, self.drums, self.banks):
+        for tab in (self.voices, self.drums, self.banks, self.tables):
             tab.romChanged.connect(self._on_changed)
 
         self.tabs = QtWidgets.QTabWidget()

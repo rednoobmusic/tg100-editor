@@ -111,13 +111,19 @@ class Voice(Record):
     mod_lfo_pitch_depth = Bits(6, 0, 4)
     aftertouch_lfo_pitch_depth = Bits(8, 0, 4)
 
-    def __init__(self, rom, index):
-        if not 0 <= index < layout.NUM_VOICES:
+    def __init__(self, rom, index, base=None, count=None):
+        """A voice inside any image laid out as 96 byte voice records.
+
+        The program ROM is the usual one, so base and count default to it.
+        The 64 voice RAM block that comes back in a sysex dump uses the same
+        record, at its own base, which is why these are parameters.
+        """
+        limit = layout.NUM_VOICES if count is None else count
+        if not 0 <= index < limit:
             raise IndexError(f"voice index out of range: {index}")
         self.index = index
-        super().__init__(
-            rom, layout.VOICE_MEM + index * layout.VOICE_SIZE, layout.VOICE_SIZE
-        )
+        start = layout.VOICE_MEM if base is None else base
+        super().__init__(rom, start + index * layout.VOICE_SIZE, layout.VOICE_SIZE)
 
     __slots__ = ("index",)
 

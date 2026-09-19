@@ -162,6 +162,23 @@ def percussion_name(note):
     return PERCUSSION.get(note, f"note {note}")
 
 
+# General MIDI groups its 128 programs into sixteen families of eight. The
+# TG100 follows that order, so the family a voice is reachable at says what
+# kind of instrument it is, which beats sorting 192 voices by ROM position.
+GM_FAMILIES = (
+    "Piano", "Chromatic percussion", "Organ", "Guitar",
+    "Bass", "Strings", "Ensemble", "Brass",
+    "Reed", "Pipe", "Synth lead", "Synth pad",
+    "Synth effects", "Ethnic", "Percussive", "Sound effects",
+)
+
+
+def gm_family(program):
+    if not 0 <= program <= 127:
+        return ""
+    return GM_FAMILIES[program // 8]
+
+
 def gm_program(program):
     if 0 <= program < len(GM_PROGRAMS):
         return GM_PROGRAMS[program]
@@ -184,7 +201,9 @@ class Names:
         self.wave_users = {}
         self.wave_refs = {}
         self.wave_names = {}
+        self.voice_programs = {}
         self._build()
+        self._build_voice_usage()
 
     def _build(self):
         # Which voices use each wave number, and HOW. The role matters more than
@@ -268,6 +287,51 @@ class Names:
     def wave(self, index):
         return self.wave_names.get(index, "")
 
+    def category(self, index):
+        """What a wave is for, so the list can be grouped by something useful."""
+        refs = self.wave_refs.get(index, [])
+        if not refs:
+            return "unused"
+        kinds = {r["kind"] for r in refs}
+        if kinds == {"drum"}:
+            return "drum"
+        if kinds == {"voice"}:
+            return "instrument"
+        return "both"
+
+    def zone(self, index):
+        """Which slice of a multisample this is, as (position, total).
+
+        A piano is ten recordings across the keyboard and they sit next to each
+        other in the wave table, so saying "3 of 10" is far more use than the
+        key range on its own.
+        """
+        refs = [r for r in self.wave_refs.get(index, []) if r["kind"] == "voice"]
+        if not refs:
+            return None
+        wave_no = refs[0]["wave_no"]
+        members = [ss.wave_index for ss in self.prog.sample_sets_for(wave_no)]
+        if index not in members or len(members) < 2:
+            return None
+        return members.index(index) + 1, len(members)
+
+    def short(self, index):
+        """A compact name for the list: instrument, zone, then key range."""
+        refs = self.wave_refs.get(index, [])
+        if not refs:
+            return ""
+        first = refs[0]
+        if first["kind"] == "drum":
+            name = first["name"]
+        else:
+            name = first["name"]
+            spot = self.zone(index)
+            if spot:
+                name += f" {spot[0]}/{spot[1]}"
+            name += f"  {first['range']}"
+        extra = len(refs) - 1
+        return name if not extra else f"{name}  +{extra}"
+
     def is_weak(self, wave_no):
         """True when no voice plays this wave number on its own.
 
@@ -320,3 +384,44 @@ class Names:
         if 0 <= index < len(self.voice_names):
             return self.voice_names[index]
         return "off" if index == layout.VOICE_OFF else f"voice {index}"
+
+    def _build_voice_usage(self):
+        """Which bank and program each voice answers to."""
+        self.voice_programs = {}
+        if not hasattr(self.prog, "bank"):
+            return
+        for bank_index in range(-1, layout.NUM_VOICE_BANKS):
+            bank = self.prog.bank(bank_index)
+            for program in range(128):
+                voice = bank.voice_index(program)
+                if voice >= layout.NUM_VOICES:
+                    continue
+                self.voice_programs.setdefault(voice, []).append(
+                    (bank_index, bank.name, program)
+                )
+
+    def programs_for(self, index):
+        return self.voice_programs.get(index, [])
+
+    def voice_family(self, index):
+        """The GM family a voice belongs to, by where it is reachable.
+
+        A voice answering to General MIDI program 0 is a piano. One reachable
+        only from the C/M 64 banks has no GM family, and one nothing points at
+        is dead weight worth knowing about.
+        """
+        spots = self.programs_for(index)
+        if not spots:
+            return "unreachable"
+        gm = [p for bank_index, _, p in spots if bank_index == 0]
+        if gm:
+            return gm_family(min(gm))
+        return "other banks"
+
+    def voice_usage(self, index):
+        spots = self.programs_for(index)
+        if not spots:
+            return ""
+        return ", ".join(f"{name} {program}" for _, name, program in spots[:4]) + (
+            f" +{len(spots) - 4}" if len(spots) > 4 else ""
+        )

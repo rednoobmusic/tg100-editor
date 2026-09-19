@@ -7,9 +7,11 @@ import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from .. import codec, dsp, naming
+from ..labels import Labels
 from ..rom import RomError
 from ..waves import NATIVE_SAMPLE_RATE
 from . import audio
+from .keyboard import PianoKeyboard
 from .waveform import WaveformView
 
 # label, attribute on WaveHeader, maximum
@@ -34,6 +36,7 @@ class WavesTab(QtWidgets.QWidget):
         self.rom = None
         self.prog = None
         self.names = None
+        self.labels = Labels()
         self._wave = None
         self._loading = False
         self._keep_status = False
@@ -43,8 +46,11 @@ class WavesTab(QtWidgets.QWidget):
     def _build(self):
         split = QtWidgets.QSplitter(QtCore.Qt.Horizontal, self)
 
-        self.table = QtWidgets.QTableWidget(0, 5)
-        self.table.setHorizontalHeaderLabels(["#", "Name", "Length", "Loop", "Uses"])
+        self.table = QtWidgets.QTableWidget(0, 6)
+        self.table.setHorizontalHeaderLabels(
+            ["#", "Name", "For", "Length", "Loop", "Uses"]
+        )
+        self.table.setSortingEnabled(True)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
@@ -56,9 +62,23 @@ class WavesTab(QtWidgets.QWidget):
         left = QtWidgets.QWidget()
         lv = QtWidgets.QVBoxLayout(left)
         lv.setContentsMargins(0, 0, 0, 0)
+        self.filter = QtWidgets.QLineEdit()
+        self.filter.setPlaceholderText(
+            "Filter by name, or type drum, instrument, unused, named"
+        )
+        self.filter.setClearButtonEnabled(True)
+        self.filter.textChanged.connect(self._apply_filter)
+        lv.addWidget(self.filter)
+
+        top = QtWidgets.QHBoxLayout()
         self.show_empty = QtWidgets.QCheckBox("Show unused slots")
         self.show_empty.toggled.connect(self.reload)
-        lv.addWidget(self.show_empty)
+        top.addWidget(self.show_empty)
+        self.count_label = QtWidgets.QLabel("")
+        self.count_label.setStyleSheet("color: #8b93a5;")
+        top.addWidget(self.count_label)
+        top.addStretch(1)
+        lv.addLayout(top)
         lv.addWidget(self.table)
         split.addWidget(left)
 
@@ -82,6 +102,20 @@ class WavesTab(QtWidgets.QWidget):
         self.status.setStyleSheet("color: #8b93a5;")
         rv.addWidget(self.status)
 
+        rename = QtWidgets.QHBoxLayout()
+        rename.addWidget(QtWidgets.QLabel("Call it"))
+        self.rename = QtWidgets.QLineEdit()
+        self.rename.setPlaceholderText(
+            "your own name for this wave, saved beside the ROM"
+        )
+        self.rename.setClearButtonEnabled(True)
+        self.rename.editingFinished.connect(self._rename)
+        rename.addWidget(self.rename, 1)
+        self.guess_label = QtWidgets.QLabel("")
+        self.guess_label.setStyleSheet("color: #8b93a5;")
+        rename.addWidget(self.guess_label)
+        rv.addLayout(rename)
+
         self.usage = QtWidgets.QPlainTextEdit()
         self.usage.setReadOnly(True)
         self.usage.setMaximumHeight(84)
@@ -90,6 +124,26 @@ class WavesTab(QtWidgets.QWidget):
 
         rv.addLayout(self._build_transport())
         rv.addLayout(self._build_tools())
+
+        keys = QtWidgets.QHBoxLayout()
+        self.follow_map = QtWidgets.QCheckBox("Follow the sample map")
+        self.follow_map.setChecked(True)
+        self.follow_map.setToolTip(
+            "On, a key plays whichever wave the sample set assigns to it, the "
+            "way the hardware would. Off, every key plays the wave you have "
+            "selected, transposed."
+        )
+        self.follow_map.toggled.connect(self._refresh_keyboard)
+        keys.addWidget(self.follow_map)
+        self.key_hint = QtWidgets.QLabel("")
+        self.key_hint.setStyleSheet("color: #8b93a5;")
+        keys.addWidget(self.key_hint)
+        keys.addStretch(1)
+        rv.addLayout(keys)
+
+        self.keyboard = PianoKeyboard()
+        self.keyboard.notePressed.connect(self._play_note)
+        rv.addWidget(self.keyboard)
         rv.addWidget(self._build_editor())
 
         split.addWidget(right)
@@ -265,6 +319,10 @@ class WavesTab(QtWidgets.QWidget):
 
     def set_roms(self, sample_rom, program_rom=None, names=None):
         self.rom = sample_rom
+        if sample_rom is not None and sample_rom.path is not None:
+            self.labels = Labels.load_for(sample_rom.path)
+        else:
+            self.labels = Labels()
         self.prog = program_rom
         self.names = names
         if program_rom is not None and names is None:
@@ -285,34 +343,73 @@ class WavesTab(QtWidgets.QWidget):
         for r, w in enumerate(waves):
             empty = w.is_empty
             used = self.names.users_of(w.index) if self.names else []
-            summary = "" if empty else (str(len(used)) if used else "-")
-            cells = [
-                str(w.index),
-                "" if empty else self._list_name(w.index),
-                "" if empty else str(w.length),
-                "" if empty else (str(w.loop) if w.loops else "one shot"),
-                summary,
-            ]
-            for c, text in enumerate(cells):
-                item = QtWidgets.QTableWidgetItem(text)
-                item.setData(QtCore.Qt.UserRole, w.index)
-                if c == 1 and used:
-                    item.setToolTip("\n".join(used))
-                if c in (0, 2):
-                    item.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-                if empty:
-                    item.setForeground(QtGui.QColor("#6b7280"))
-                self.table.setItem(r, c, item)
+            category = self.names.category(w.index) if self.names else ""
+
+            self._num(r, 0, w.index, w.index)
+            self._text(r, 1, self._list_name(w.index), w.index, empty)
+            self._text(r, 2, "" if empty else category, w.index, empty)
+            self._num(r, 3, w.length if not empty else 0, w.index, blank=empty)
+            self._text(
+                r, 4, "" if empty else (str(w.loop) if w.loops else "one shot"),
+                w.index, empty,
+            )
+            self._num(r, 5, len(used), w.index, blank=empty and not used)
+
+            if used:
+                self.table.item(r, 1).setToolTip("\n".join(used))
+
+        self.table.setSortingEnabled(True)
+        self.table.sortItems(0, QtCore.Qt.AscendingOrder)
         self.table.resizeColumnsToContents()
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
+        self._apply_filter(self.filter.text())
         if self.table.rowCount():
             self.table.selectRow(0)
 
+    def _num(self, row, col, value, index, blank=False):
+        item = QtWidgets.QTableWidgetItem()
+        item.setData(QtCore.Qt.DisplayRole, "" if blank else int(value))
+        item.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        item.setData(QtCore.Qt.UserRole, index)
+        self.table.setItem(row, col, item)
+
+    def _text(self, row, col, text, index, dim=False):
+        item = QtWidgets.QTableWidgetItem(str(text))
+        item.setData(QtCore.Qt.UserRole, index)
+        if dim:
+            item.setForeground(QtGui.QColor("#6b7280"))
+        self.table.setItem(row, col, item)
+
+    def _apply_filter(self, text):
+        """Hide rows that do not match. Bare words match the name or category."""
+        text = (text or "").strip().lower()
+        shown = 0
+        for r in range(self.table.rowCount()):
+            if not text:
+                visible = True
+            else:
+                index = self.table.item(r, 0).data(QtCore.Qt.UserRole)
+                name = (self.table.item(r, 1).text() or "").lower()
+                category = (self.table.item(r, 2).text() or "").lower()
+                if text == "named":
+                    visible = self.labels.has(index)
+                else:
+                    visible = text in name or text == category
+            self.table.setRowHidden(r, not visible)
+            shown += visible
+        total = self.table.rowCount()
+        self.count_label.setText(
+            f"{total} waves" if shown == total else f"{shown} of {total} waves"
+        )
+
     def _list_name(self, index):
+        mine = self.labels.name(index)
+        if mine:
+            return mine
         if self.names is None:
             return ""
-        label = self.names.wave(index)
+        label = self.names.short(index)
         if label and self.names.wave_is_weak(index):
             label += "  (?)"
         return label
@@ -343,6 +440,9 @@ class WavesTab(QtWidgets.QWidget):
                 self.view.clear()
                 self.info.setText(f"Wave {w.index} is an unused slot.")
                 self.usage.clear()
+                self.rename.clear()
+                self.guess_label.clear()
+                self._refresh_keyboard()
                 for spin in self.spins.values():
                     spin.setEnabled(False)
                 self.loop_spin.setEnabled(False)
@@ -371,6 +471,9 @@ class WavesTab(QtWidgets.QWidget):
             self.view.set_wave(samples, w.loop, w.loops)
             self.loop_spin.setMaximum(max(0, w.length))
             self.loop_spin.setValue(w.loop)
+            self.rename.setText(self.labels.name(w.index))
+            self._refresh_keyboard()
+            self._update_guess_label(w)
             self.one_shot.setChecked(w.one_shot)
             self.loop_spin.setEnabled(not w.one_shot)
             self._update_loop_window(w)
@@ -431,6 +534,34 @@ class WavesTab(QtWidgets.QWidget):
         setattr(self._wave, attr, value)
         self.romChanged.emit()
 
+    def _rename(self):
+        w = self._wave
+        if w is None or w.is_empty:
+            return
+        text = self.rename.text().strip()
+        if text == self.labels.name(w.index):
+            return
+        self.labels.set_name(w.index, text)
+        if self.rom is not None and self.rom.path is not None:
+            self.labels.save(Labels.sidecar_for(self.rom.path))
+        row = self.table.currentRow()
+        if row >= 0:
+            self.table.item(row, 1).setText(self._list_name(w.index))
+        self._update_guess_label(w)
+        self.status.setText(
+            f"wave {w.index} is now called {text!r}" if text
+            else f"wave {w.index} is back to its guessed name"
+        )
+
+    def _update_guess_label(self, w):
+        if self.names is None:
+            self.guess_label.clear()
+            return
+        guess = self.names.short(w.index) or "nothing uses it"
+        self.guess_label.setText(
+            f"guessed: {guess}" if self.labels.has(w.index) else ""
+        )
+
     def _fill_usage(self, w):
         if self.names is None:
             self.usage.setPlainText("Load a program ROM to see what uses this wave.")
@@ -444,6 +575,84 @@ class WavesTab(QtWidgets.QWidget):
                 "treat the name as a guess.",
             )
         self.usage.setPlainText("\n".join(lines))
+
+    def _sample_set_for(self, index):
+        """The sample set that points at a wave, if any, for its root note."""
+        if self.prog is None:
+            return None
+        for wave_no in range(140):
+            for ss in self.prog.sample_sets_for(wave_no):
+                if ss.wave_index == index:
+                    return ss
+        return None
+
+    def _refresh_keyboard(self):
+        w = self._wave
+        if w is None or w.is_empty:
+            self.keyboard.set_range(None, None)
+            self.keyboard.set_root(None)
+            self.key_hint.clear()
+            return
+        ss = self._sample_set_for(w.index)
+        if ss is not None:
+            self.keyboard.set_range(ss.note_low, ss.note_high)
+            self.keyboard.set_root(ss.root_note)
+            self.key_hint.setText(
+                f"mapped {naming.note_range(ss.note_low, ss.note_high)}, "
+                f"recorded at {naming.note_name(ss.root_note)}"
+            )
+        else:
+            self.keyboard.set_range(None, None)
+            self.keyboard.set_root(None)
+            self.key_hint.setText(
+                "no sample set points at this wave, so keys transpose from C3"
+            )
+
+    def _play_note(self, note):
+        """Play whatever the hardware would put on this key."""
+        if self.rom is None or not self._player.available:
+            return
+        wave, root = self._wave, 60
+        if self.follow_map.isChecked() and self.prog is not None:
+            mapped = self._mapped_wave(note)
+            if mapped is not None:
+                wave, root = mapped
+        if wave is None or wave.is_empty:
+            return
+        if root == 60:
+            ss = self._sample_set_for(wave.index)
+            if ss is not None:
+                root = ss.root_note
+
+        self.keyboard.clear_lights()
+        self.keyboard.light(note)
+        buf = audio.render(
+            wave.samples(),
+            loop=wave.loop,
+            loops=wave.loops and self.loop_playback.isChecked(),
+            semitones=note - root,
+            seconds=1.5,
+        )
+        self._player.play(buf)
+        self.status.setText(
+            f"{naming.note_name(note)}  wave {wave.index} "
+            f"{self.names.short(wave.index) if self.names else ''} "
+            f"at {note - root:+d} semitones"
+        )
+
+    def _mapped_wave(self, note):
+        """Which wave and root note the sample map puts on a key."""
+        current = self._wave
+        if current is None:
+            return None
+        for wave_no in range(140):
+            sets = self.prog.sample_sets_for(wave_no)
+            if not any(ss.wave_index == current.index for ss in sets):
+                continue
+            for ss in sets:
+                if ss.note_low <= note <= ss.note_high:
+                    return self.rom.wave(ss.wave_index), ss.root_note
+        return None
 
     def _update_loop_window(self, w):
         if w.one_shot:

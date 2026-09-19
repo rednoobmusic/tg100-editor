@@ -61,6 +61,72 @@ class BoundSpin(Bound):
         self.hint.setEnabled(on)
 
 
+class BoundSlider(Bound):
+    """A slider with its value beside it, for anything continuous.
+
+    Synth parameters are felt as positions on a range, not as numbers, so the
+    slider is the control and the number is the readout. The spin box is still
+    there for when you want to type an exact value.
+    """
+
+    def __init__(self, getter, setter, lo, hi, describe=None, parent=None):
+        super().__init__(getter, setter, parent)
+        self.widget = QtWidgets.QWidget()
+        row = QtWidgets.QHBoxLayout(self.widget)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+
+        self.slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.slider.setRange(lo, hi)
+        self.slider.setMinimumWidth(90)
+        self.slider.valueChanged.connect(self._from_slider)
+
+        self.spin = QtWidgets.QSpinBox()
+        self.spin.setRange(lo, hi)
+        self.spin.setKeyboardTracking(False)
+        self.spin.setMaximumWidth(64)
+        self.spin.valueChanged.connect(self._from_spin)
+
+        row.addWidget(self.slider, 1)
+        row.addWidget(self.spin)
+
+        self.describe = describe
+        self.hint = QtWidgets.QLabel()
+        self.hint.setStyleSheet("color: #8b93a5;")
+        self.changed.connect(self._update_hint)
+
+    def _from_slider(self, value):
+        if self.spin.value() != value:
+            self.spin.blockSignals(True)
+            self.spin.setValue(value)
+            self.spin.blockSignals(False)
+        self._store(value)
+        self._update_hint()
+
+    def _from_spin(self, value):
+        if self.slider.value() != value:
+            self.slider.setValue(value)
+        else:
+            self._store(value)
+            self._update_hint()
+
+    def _apply(self, value):
+        value = int(value)
+        for w in (self.slider, self.spin):
+            w.blockSignals(True)
+            w.setValue(value)
+            w.blockSignals(False)
+        self._update_hint()
+
+    def _update_hint(self):
+        if self.describe is not None:
+            self.hint.setText(self.describe(self.slider.value()))
+
+    def setEnabled(self, on):
+        self.widget.setEnabled(on)
+        self.hint.setEnabled(on)
+
+
 class BoundCombo(Bound):
     def __init__(self, getter, setter, items, parent=None):
         """items is a sequence of (value, label) pairs."""
@@ -114,7 +180,7 @@ class FieldGrid(QtWidgets.QWidget):
     def add(self, label, bound, hint=True):
         self.grid.addWidget(QtWidgets.QLabel(label), self._row, 0)
         self.grid.addWidget(bound.widget, self._row, 1)
-        if hint and isinstance(bound, BoundSpin) and bound.describe is not None:
+        if hint and isinstance(bound, (BoundSpin, BoundSlider)) and bound.describe is not None:
             self.grid.addWidget(bound.hint, self._row, 2)
         bound.changed.connect(self.changed)
         self.fields.append(bound)

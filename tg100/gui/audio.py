@@ -76,11 +76,15 @@ class Player(QtCore.QObject):
             return False
         self.stop()
 
-        pcm = (np.clip(samples, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
+        # The wave table is mono, but a mono stream gets routed to the left
+        # channel alone on a lot of setups, so the same signal goes to both.
+        mono = (np.clip(samples, -1.0, 1.0) * 32767.0).astype("<i2")
+        stereo = np.repeat(mono, 2)
+        pcm = stereo.tobytes()
 
         fmt = QAudioFormat()
         fmt.setSampleRate(int(round(sample_rate)))
-        fmt.setChannelCount(1)
+        fmt.setChannelCount(2)
         fmt.setSampleFormat(QAudioFormat.Int16)
 
         device = QMediaDevices.defaultAudioOutput()
